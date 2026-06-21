@@ -1,0 +1,64 @@
+!pip install ipywidgets
+from google.colab import output
+output.enable_custom_widget_manager()
+import numpy as np
+import matplotlib.pyplot as plt
+from ipywidgets import interact, FloatSlider, IntSlider, Dropdown
+
+# Pauli matrices
+X = np.array([[0,1],[1,0]], dtype=complex)
+Z = np.array([[1,0],[0,-1]], dtype=complex)
+Y = np.array([[0,-1j],[1j,0]], dtype=complex)
+
+# initial superposition |+>
+psi = np.array([1,1])/np.sqrt(2)
+rho0 = np.outer(psi, np.conjugate(psi))
+
+
+def apply_noise(rho, p, noise_type):
+
+    if noise_type == "Bit Flip":
+        return (1-p)*rho + p*X @ rho @ X
+
+    if noise_type == "Phase Flip":
+        return (1-p)*rho + p*Z @ rho @ Z
+
+    if noise_type == "Depolarizing":
+        return (1-p)*rho + (p/3)*(X@rho@X + Y@rho@Y + Z@rho@Z)
+
+
+def simulate(p=0.1, steps=20, noise_type="Phase Flip"):
+
+    rho = rho0.copy()
+    coherence = []
+    purity = []
+
+    for _ in range(steps):
+
+        rho = apply_noise(rho, p, noise_type)
+
+        coherence.append(abs(rho[0,1]))
+        purity.append(np.trace(rho @ rho).real)
+
+    plt.figure(figsize=(10,4))
+
+    plt.subplot(1,2,1)
+    plt.plot(coherence)
+    plt.title("Coherence |ρ01|")
+    plt.xlabel("Decoherence Step")
+
+    plt.subplot(1,2,2)
+    plt.plot(purity)
+    plt.title("Purity Tr(ρ²)")
+    plt.xlabel("Decoherence Step")
+
+    plt.tight_layout()
+    plt.show()
+
+
+interact(
+    simulate,
+    p=FloatSlider(min=0,max=0.5,step=0.01,value=0.1),
+    steps=IntSlider(min=5,max=100,value=20),
+    noise_type=Dropdown(options=["Phase Flip","Bit Flip","Depolarizing"])
+)

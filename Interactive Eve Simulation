@@ -1,0 +1,176 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+N = 20000  # number of qubits
+
+# -------------------------
+# Interactive Eve setup
+# -------------------------
+eve_name = input("Enter your name (Eve): ")
+num_interfere = int(input(f"Hello {eve_name}, how many times do you want to interfere? "))
+
+# -------------------------
+# Combined noise + Eve
+# -------------------------
+def combined_noise(bits, p_bit, p_phase, p_depol, p_eve, eve_attack=False):
+    noisy = bits.copy()
+
+    # Bit flip
+    flips = np.random.rand(len(bits)) < p_bit
+    noisy[flips] = 1 - noisy[flips]
+
+    # Phase flip
+    flips = np.random.rand(len(bits)) < p_phase
+    noisy[flips] = 1 - noisy[flips]
+
+    # Depolarizing (randomize bits)
+    depol_mask = np.random.rand(len(bits)) < p_depol
+    noisy[depol_mask] = np.random.randint(0,2,np.sum(depol_mask))
+
+    # Eve intercept-resend
+    if eve_attack:
+        for _ in range(num_interfere):
+            attack_mask = np.random.rand(len(bits)) < p_eve
+            noisy[attack_mask] = np.random.randint(0,2,np.sum(attack_mask))
+
+    return noisy
+
+# -------------------------
+# QBER
+# -------------------------
+def qber(a,b):
+    return np.sum(a!=b)/len(a)
+
+# -------------------------
+# Protocols
+# -------------------------
+def BB84(noisy_func, p_bit, p_phase, p_depol, p_eve, eve_attack=False):
+    alice = np.random.randint(0,2,N)
+    basis_a = np.random.randint(0,2,N)
+    noisy = noisy_func(alice, p_bit, p_phase, p_depol, p_eve, eve_attack)
+    basis_b = np.random.randint(0,2,N)
+    mask = basis_a==basis_b
+    return qber(alice[mask], noisy[mask])
+
+def Decoy_BB84(noisy_func, p_bit, p_phase, p_depol, p_eve, eve_attack=False):
+    alice = np.random.randint(0,2,N)
+    decoy = np.random.rand(N)<0.2
+    noisy = noisy_func(alice, p_bit, p_phase, p_depol, p_eve, eve_attack)
+    mask = ~decoy
+    return qber(alice[mask], noisy[mask])
+
+def B92(noisy_func, p_bit, p_phase, p_depol, p_eve, eve_attack=False):
+    alice = np.random.randint(0,2,N)
+    noisy = noisy_func(alice, p_bit, p_phase, p_depol, p_eve, eve_attack)
+    mask = np.random.rand(N)<0.5
+    return qber(alice[mask], noisy[mask])
+
+def Decoy_B92(noisy_func, p_bit, p_phase, p_depol, p_eve, eve_attack=False):
+    alice = np.random.randint(0,2,N)
+    decoy = np.random.rand(N)<0.2
+    noisy = noisy_func(alice, p_bit, p_phase, p_depol, p_eve, eve_attack)
+    mask = (~decoy) & (np.random.rand(N)<0.5)
+    return qber(alice[mask], noisy[mask])
+
+def DPS_B92(noisy_func, p_bit, p_phase, p_depol, p_eve, eve_attack=False):
+    alice = np.random.randint(0,2,N)
+    phase = np.mod(np.cumsum(alice),2)
+    noisy = noisy_func(phase, p_bit, p_phase, p_depol, p_eve, eve_attack)
+    return qber(phase, noisy)
+
+def TwoWay_B92(noisy_func, p_bit, p_phase, p_depol, p_eve, eve_attack=False):
+    alice = np.random.randint(0,2,N)
+    forward = noisy_func(alice, p_bit, p_phase, p_depol, p_eve, eve_attack)
+    backward = noisy_func(forward, p_bit, p_phase, p_depol, p_eve, eve_attack)
+    return qber(alice, backward)
+
+def Entanglement_B92(noisy_func, p_bit, p_phase, p_depol, p_eve, eve_attack=False):
+    alice = np.random.randint(0,2,N)
+    bob = noisy_func(alice, p_bit, p_phase, p_depol, p_eve, eve_attack)
+    return qber(alice, bob)
+
+def SRP_B92(noisy_func, p_bit, p_phase, p_depol, p_eve, eve_attack=False):
+    alice = np.random.randint(0,2,N)
+    rotated = alice.copy()
+    noisy = noisy_func(rotated, p_bit, p_phase, p_depol, p_eve, eve_attack)
+    return qber(alice, noisy)
+
+def SARG04(noisy_func, p_bit, p_phase, p_depol, p_eve, eve_attack=False):
+    alice = np.random.randint(0,2,N)
+    noisy = noisy_func(alice, p_bit, p_phase, p_depol, p_eve, eve_attack)
+    mask = np.random.rand(N)<0.25
+    return qber(alice[mask], noisy[mask])
+
+# -------------------------
+# Protocol dictionary
+# -------------------------
+protocols = {
+    "BB84": BB84,
+    "Decoy BB84": Decoy_BB84,
+    "B92": B92,
+    "Decoy B92": Decoy_B92,
+    "DPS B92": DPS_B92,
+    "TwoWay B92": TwoWay_B92,
+    "Entangled B92": Entanglement_B92,
+    "SRP B92": SRP_B92,
+    "SARG04": SARG04
+}
+
+# -------------------------
+# Noise probabilities
+# -------------------------
+noise_probs = np.linspace(0,0.3,10)  # 10 steps
+fixed_val = 0.05  # fixed noise probability for one axis
+
+# -------------------------
+# Simulation and plotting
+# -------------------------
+def simulate_and_plot(eve_attack=False):
+    for fixed_idx, fixed_label in zip([0,1,2], ["Bit Flip","Phase Flip","Depolarizing"]):
+        plt.figure(figsize=(12,8))
+        for name, func in protocols.items():
+            qber_vals = []
+            for p1 in noise_probs:
+                for p2 in noise_probs:
+                    if fixed_idx==0:
+                        p_bit, p_phase, p_depol = fixed_val, p1, p2
+                    elif fixed_idx==1:
+                        p_bit, p_phase, p_depol = p1, fixed_val, p2
+                    else:
+                        p_bit, p_phase, p_depol = p1, p2, fixed_val
+                    q = func(combined_noise, p_bit, p_phase, p_depol, p_eve, eve_attack)
+                    qber_vals.append(q)
+            avg_qber = np.mean(np.array(qber_vals).reshape(len(noise_probs),len(noise_probs)),axis=0)
+            plt.plot(noise_probs, avg_qber, label=name)
+        plt.xlabel("Noise Probability (other axes vary)")
+        plt.ylabel("QBER")
+        title = f"QBER vs Noise Probability (fixed {fixed_label} = {fixed_val})"
+        if eve_attack:
+            title += " - This is the result of eavesdropping"
+        plt.title(title)
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+
+# -------------------------
+# Run standard QBER plots
+# -------------------------
+print("Standard QBER plots (no Eve interference):")
+p_eve = 0.1
+simulate_and_plot(eve_attack=False)
+
+# -------------------------
+# Run QBER plots under Eve interference
+# -------------------------
+print(f"\n{eve_name}'s Eavesdropping session:")
+simulate_and_plot(eve_attack=True)
+
+# -------------------------
+# Optional: Print QBER differences
+# -------------------------
+print("\nDifference between standard QBER and QBER under Eve interference:")
+for name, func in protocols.items():
+    q_standard = func(combined_noise, fixed_val, fixed_val, fixed_val, p_eve, eve_attack=False)
+    q_eve = func(combined_noise, fixed_val, fixed_val, fixed_val, p_eve, eve_attack=True)
+    diff = q_eve - q_standard
+    print(f"{name}: ΔQBER = {diff:.4f}")

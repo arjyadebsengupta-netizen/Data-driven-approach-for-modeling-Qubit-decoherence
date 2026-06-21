@@ -1,0 +1,272 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import Lasso, Ridge
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.multioutput import MultiOutputRegressor
+from sklearn.preprocessing import StandardScaler
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from collections import defaultdict
+
+# =========================
+# 1. DATA GENERATION
+# =========================
+
+np.random.seed(42)
+torch.manual_seed(42)
+
+X_mat = np.array([[0, 1],
+                  [1, 0]], dtype=complex)
+
+def random_qubit_coeff():
+    # sample complex Gaussian
+    real = np.random.randn(2)
+    imag = np.random.randn(2)
+
+    psi = real + 1j * imag
+
+    # normalize
+    psi = psi/np.linalg.norm(psi)
+
+    a, b = psi[0], psi[1]
+    return a, b
+
+def coeff_to_rho(a, b):
+    psi = np.array([a, b])
+    return np.outer(psi, np.conj(psi))
+
+def pauli_x_noise(rho, p):
+    return (1 - p) * rho + p * (X_mat @ rho @ X_mat)
+
+def flatten_complex(arr):
+    return np.hstack([arr.real.flatten(), arr.imag.flatten()])
+
+def generate_dataset(N=1000):
+    data = []
+    seen = set()
+
+    while len(data) < N:
+        a, b = random_qubit_coeff()
+
+        key = tuple(np.round([a.real, a.imag, b.real, b.imag], 6))
+        if key in seen:
+            continue
+        seen.add(key)
+
+        p = np.random.uniform(0, 1)
+
+        rho = coeff_to_rho(a, b)
+        rho_noisy = pauli_x_noise(rho, p)
+
+        coeff = np.array([a.real, a.imag, b.real, b.imag])
+        noisy_flat = flatten_complex(rho_noisy)
+
+        row = np.concatenate([[p], coeff, noisy_flat])
+        data.append(row)
+
+    return np.array(data)
+
+# =========================
+# 2. MC SPLITS
+# =========================
+
+def mc_splits(data, n_splits=5, test_size=0.2):
+    splits = []
+    for i in range(n_splits):
+        train, test = train_test_split(
+            data, test_size=test_size, shuffle=True, random_state=42+i
+        )
+
+        X_train, Y_train = train[:, :5], train[:, 5:]
+        X_test, Y_test = test[:, :5], test[:, 5:]
+
+        splits.append((X_train, Y_train, X_test, Y_test))
+    return splits
+
+# =========================
+# 3. SCALING
+# =========================
+
+def scale_data(X_train, Y_train, X_test, Y_test):
+    sx = StandardScaler()
+    sy = StandardScaler()
+
+    X_train_s = sx.fit_transform(X_train)
+    Y_train_s = sy.fit_transform(Y_train)
+
+    X_test_s = sx.transform(X_test)
+    Y_test_s = sy.transform(Y_test)
+
+    return X_train_s, Y_train_s, X_test_s, Y_test_s, sx, sy
+
+# =========================
+# 4. MODELS
+# =========================
+
+def train_lasso(X, Y):
+    model = MultiOutputRegressor(Lasso(alpha=0.001))
+    model.fit(X, Y)
+    return model
+
+def train_ridge(X, Y):
+    model = MultiOutputRegressor(Ridge(alpha=1.0))
+    model.fit(X, Y)
+    return model
+
+def train_gb(X, Y):
+    model = MultiOutputRegressor(
+        GradientBoostingRegressor(n_estimators=100, max_depth=3)
+    )
+    model.fit(X, Y)
+    return model
+
+class StandardNN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(5, 32),
+            nn.ReLU(),
+            nn.Linear(32, 32),
+            nn.ReLU(),
+            nn.Linear(32, 8)
+        )
+    def forward(self, x):
+        return self.net(x)
+
+class ResidualBlock(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.fc1 = nn.Linear(dim, dim)
+        self.fc2 = nn.Linear(dim, dim)
+
+    def forward(self, x):
+        return x + self.fc2(torch.relu(self.fc1(x)))
+
+class ResidualNN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.input = nn.Linear(5, 32)
+        self.block1 = ResidualBlock(32)
+        self.block2 = ResidualBlock(32)
+        self.output = nn.Linear(32, 8)
+
+    def forward(self, x):
+        x = torch.relu(self.input(x))
+        x = self.block1(x)
+        x = self.block2(x)
+        return self.output(x)
+
+def train_nn(model, X, Y, epochs=200):
+    X = torch.tensor(X, dtype=torch.float32)
+    Y = torch.tensor(Y, dtype=torch.float32)
+
+    opt = optim.Adam(model.parameters(), lr=1e-3)
+    loss_fn = nn.MSELoss()
+
+    for _ in range(epochs):
+        opt.zero_grad()
+        loss = loss_fn(model(X), Y)
+        loss.backward()
+        opt.step()
+
+    return model
+
+def predict_nn(model, X):
+    X = torch.tensor(X, dtype=torch.float32)
+    with torch.no_grad():
+        return model(X).numpy()
+
+# =========================
+# 5. MATRIX MSE
+# =========================
+
+def reconstruct(vec):
+    real = vec[:4].reshape(2,2)
+    imag = vec[4:].reshape(2,2)
+    return real + 1j*imag
+
+def mse_matrix(Y_true, Y_pred):
+    total = 0
+    for i in range(len(Y_true)):
+        diff = reconstruct(Y_true[i]) - reconstruct(Y_pred[i])
+        total += np.linalg.norm(diff, 'fro')**2
+    return total / len(Y_true)
+
+# =========================
+# 6. EDA
+# =========================
+
+def run_eda(data):
+    df = pd.DataFrame(data)
+
+    print("\nShape:", df.shape)
+    print(df.describe())
+
+    plt.figure()
+    plt.hist(df[0], bins=30)
+    plt.title("p distribution")
+    plt.show()
+
+    plt.figure()
+    for i in range(1,5):
+        plt.hist(df[i], bins=30, alpha=0.5)
+    plt.title("coefficients")
+    plt.show()
+
+# =========================
+# 7. MAIN
+# =========================
+
+data = generate_dataset(1000)
+run_eda(data)
+
+splits = mc_splits(data, 5)
+
+results = []
+
+for (X_train, Y_train, X_test, Y_test) in splits:
+
+    Xs, Ys, Xts, Yts, sx, sy = scale_data(X_train, Y_train, X_test, Y_test)
+
+    models = {
+        "Lasso": train_lasso(Xs, Ys),
+        "Ridge": train_ridge(Xs, Ys),
+        "GB": train_gb(Xs, Ys)
+    }
+
+    for name, model in models.items():
+        pred = model.predict(Xts)
+        pred = sy.inverse_transform(pred)
+        mse = mse_matrix(Y_test, pred)
+        results.append((name, mse))
+
+    for name, model in {
+        "Standard NN": StandardNN(),
+        "Normalized NN": StandardNN(),
+        "Residual NN": ResidualNN()
+    }.items():
+        model = train_nn(model, Xs, Ys)
+        pred = predict_nn(model, Xts)
+        pred = sy.inverse_transform(pred)
+        mse = mse_matrix(Y_test, pred)
+        results.append((name, mse))
+
+# =========================
+# 8. AVERAGED RESULTS
+# =========================
+
+avg_results = defaultdict(list)
+
+for name, val in results:
+    avg_results[name].append(val)
+
+print("\n=== Averaged Results (MC = 5) ===\n")
+
+for name, vals in avg_results.items():
+    print(f"{name:<20} : {np.mean(vals):.6f} ± {np.std(vals):.6f}")
+   
